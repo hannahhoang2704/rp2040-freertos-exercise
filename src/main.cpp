@@ -1,3 +1,13 @@
+
+
+//Implement a code lock that uses three tasks to read button presses and one task to process the button
+//presses. The button presses from reader tasks must be passed to the processing task using a queue. The
+//button to monitor and the queue to send to are passed through task parameters pointer.
+//The processing task waits on the button queue with 5 second wait time. If a button press is received, then it
+//is processed as described later. If a timeout occurs, then lock is returned to the initial state where it starts
+//detecting the sequence from the beginning.
+//The sequence to open the lock is 0-0-2-1-2
+
 #include <iostream>
 #include "FreeRTOS.h"
 #include "task.h"
@@ -13,37 +23,46 @@ uint32_t read_runtime_ctr(void) {
     return timer_hw->timerawl;
     }
 }
-const uint8_t correct_sequence[] = {0, 0, 2, 1, 2};
-const size_t sequence_length = sizeof(correct_sequence) / sizeof(correct_sequence[0]);
+const uint lock_sequence[] = {0, 0, 2, 1, 2};
+const size_t sequence_length = sizeof(lock_sequence) / sizeof(lock_sequence[0]);
 
-struct sw_params {
-    QueueHandle_t comm_q;
-    uint pin;
-    uint8_t sw_nr;
-    bool pressed = false;
-};
-
-bool pressed_switch(sw_params * sw){
-    if (!gpio_get(sw->pin) && !sw->pressed) {
-        return (sw->pressed = true);
-    } else if (gpio_get(sw->pin) && sw->pressed) {
-        sw->pressed = false;
+class Button{
+public:
+    Button(uint pin, uint nr): btn(pin), sw_nr(nr), pressed(false){
+        gpio_init(pin);
+        gpio_set_dir(pin, GPIO_IN);
+        gpio_pull_up(pin);
     }
-    return false;
-}
+    bool pressed_switch(){
+        if (!gpio_get(btn) && !pressed) {
+            std::cout << "Switch " << sw_nr << " pressed" << std::endl;
+            return (pressed = true);
+        } else if (gpio_get(btn) && pressed) {
+            pressed = false;
+        }
+        return false;
+    }
+    static QueueHandle_t shared_queue;
+    static void set_shared_queue(QueueHandle_t queue){
+        shared_queue = queue;
+    }
+    uint8_t get_sw_nr(){
+        return sw_nr;
+    }
+private:
+    uint btn;
+    bool pressed;
+    uint sw_nr;
+};
+QueueHandle_t Button::shared_queue = nullptr;
 
-void switch_reader(void *param) {
-    sw_params *tpr = (sw_params *)param;
-    const uint pin = tpr->pin;
-    const uint sw_nr = tpr->sw_nr;
-    QueueHandle_t queue = tpr->comm_q;
-    gpio_init(pin);
-    gpio_set_dir(pin, GPIO_IN);
-    gpio_pull_up(pin);
-
-    while(true) {
-        if(pressed_switch(tpr)){
-            xQueueSendToBack(queue, &sw_nr, pdMS_TO_TICKS(100));
+void read_switch(void *param){
+    Button *sw = (Button *)param;
+    uint sw_nr = sw->get_sw_nr();
+    QueueHandle_t queue = sw->shared_queue;
+    while(true){
+        if(sw->pressed_switch()){
+            xQueueSendToBack(queue, &sw_nr, pdMS_TO_TICKS(5000));
         }
         vTaskDelay(pdMS_TO_TICKS(50));
     }
@@ -51,26 +70,26 @@ void switch_reader(void *param) {
 
 void process_data_input(void *param) {
     QueueHandle_t queue = (QueueHandle_t)param;
-    uint8_t received_sequence[sequence_length] = {};
+    uint received_sequence[sequence_length] = {};
     size_t index = 0;
 
     while (true) {
-        uint8_t button_id;
+        uint button_id;
         if (xQueueReceive(queue, &button_id, pdMS_TO_TICKS(5000)) == pdTRUE) {
-            std::cout << "Received button: " << (int)button_id << std::endl;
+            std::cout << "Number received: " << button_id << std::endl;
             received_sequence[index] = button_id;
-            if (received_sequence[index] == correct_sequence[index]) {
+            if (received_sequence[index] == lock_sequence[index]) {
                 index++;
                 if (index == sequence_length) {
                     std::cout << "Lock Unlocked!" << std::endl;
                     index = 0;
                 }
             } else {
-                std::cout << "Incorrect sequence, resetting." << std::endl;
+                std::cout << "Wrong sequence, reset." << std::endl;
                 index = 0;
             }
         } else {
-            std::cout << "Timeout, resetting sequence." << std::endl;
+            std::cout << "Timeout, reset" << std::endl;
             index = 0;
         }
     }
@@ -79,19 +98,19 @@ void process_data_input(void *param) {
 int main() {
     stdio_init_all();
 
-    QueueHandle_t button_queue = xQueueCreate(10, sizeof(uint8_t));
+    QueueHandle_t button_queue = xQueueCreate(8, sizeof(int));
+    Button::set_shared_queue(button_queue);
 
-    static sw_params sw0_params = {.comm_q = button_queue, .pin = SW0, .sw_nr = 0};
-    static sw_params sw1_params = {.comm_q = button_queue, .pin = SW1, .sw_nr = 1};
-    static sw_params sw2_params = {.comm_q = button_queue, .pin = SW2, .sw_nr = 2};
+    static Button sw0(SW0, 0);
+    static Button sw1(SW1, 1);
+    static Button sw2(SW2, 2);
 
-    xTaskCreate(switch_reader, "SwitchReader0", 256, (void *)&sw0_params, tskIDLE_PRIORITY + 1, NULL);
-    xTaskCreate(switch_reader, "SwitchReader1", 256, (void *)&sw1_params, tskIDLE_PRIORITY + 1, NULL);
-    xTaskCreate(switch_reader, "SwitchReader2", 256, (void *)&sw2_params, tskIDLE_PRIORITY + 1, NULL);
+    xTaskCreate(read_switch, "SwitchReader0", 256, (void *)&sw0, tskIDLE_PRIORITY + 1, NULL);
+    xTaskCreate(read_switch, "SwitchReader1", 256, (void *)&sw1, tskIDLE_PRIORITY + 1, NULL);
+    xTaskCreate(read_switch, "SwitchReader0", 256, (void *)&sw2, tskIDLE_PRIORITY + 1, NULL);
 
     xTaskCreate(process_data_input, "ProcessLockPw", 512, (void *)button_queue, tskIDLE_PRIORITY + 2, NULL);
 
-    // Start the FreeRTOS scheduler
     vTaskStartScheduler();
 
     while (1) {};
