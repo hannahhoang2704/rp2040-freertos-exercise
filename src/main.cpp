@@ -18,6 +18,10 @@
 #define SW1 8
 #define SW2 7
 
+#define LED_1 20
+#define LED_2 21
+#define LED_3 22
+
 extern "C" {
 uint32_t read_runtime_ctr(void) {
     return timer_hw->timerawl;
@@ -43,9 +47,6 @@ public:
         return false;
     }
     static QueueHandle_t shared_queue;
-    static void set_shared_queue(QueueHandle_t queue){
-        shared_queue = queue;
-    }
     uint8_t get_sw_nr(){
         return sw_nr;
     }
@@ -98,8 +99,7 @@ void process_data_input(void *param) {
 int main() {
     stdio_init_all();
 
-    QueueHandle_t button_queue = xQueueCreate(8, sizeof(int));
-    Button::set_shared_queue(button_queue);
+    Button::shared_queue = xQueueCreate(8, sizeof(int));
 
     static Button sw0(SW0, 0);
     static Button sw1(SW1, 1);
@@ -109,7 +109,7 @@ int main() {
     xTaskCreate(read_switch, "SwitchReader1", 256, (void *)&sw1, tskIDLE_PRIORITY + 1, NULL);
     xTaskCreate(read_switch, "SwitchReader0", 256, (void *)&sw2, tskIDLE_PRIORITY + 1, NULL);
 
-    xTaskCreate(process_data_input, "ProcessLockPw", 512, (void *)button_queue, tskIDLE_PRIORITY + 2, NULL);
+    xTaskCreate(process_data_input, "ProcessLockPw", 512, (void *)Button::shared_queue, tskIDLE_PRIORITY + 2, NULL);
 
     vTaskStartScheduler();
 
