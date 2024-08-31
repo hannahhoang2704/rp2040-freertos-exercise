@@ -1,115 +1,86 @@
 
 
-//Implement a code lock that uses three tasks to read button presses and one task to process the button
-//presses. The button presses from reader tasks must be passed to the processing task using a queue. The
-//button to monitor and the queue to send to are passed through task parameters pointer.
-//The processing task waits on the button queue with 5 second wait time. If a button press is received, then it
-//is processed as described later. If a timeout occurs, then lock is returned to the initial state where it starts
-//detecting the sequence from the beginning.
-//The sequence to open the lock is 0-0-2-1-2
+//Part 1 – Activity indicator with a binary semaphore
+//Write a program that creates two tasks: one for reading characters from the serial port and the other for
+//indicating received characters on the serial port. Use a binary semaphore to notify serial port activity to the
+//indicator task. Note that a single blink sequence (200 ms) takes much longer than transmission time of one
+//character (0.1 ms) and only one blink after last character is allowed.
+//Task 1
+//Task reads characters from debug serial port using getchar_timeout_us and echoes them back to the serial
+//port. When a character is received the task sends an indication (= gives the binary semaphore) to blinker task.
+//Task 2
+//This task blinks the led once (100 ms on, 100 ms off) when it receives activity indication (= takes the binary
+//semaphore).
 
 #include <iostream>
 #include "FreeRTOS.h"
 #include "task.h"
 #include "queue.h"
+#include "semphr.h"
 #include "pico/stdlib.h"
 
-#define SW0 9
-#define SW1 8
-#define SW2 7
+#define LED_1 22
+#define LED_2 21
+#define LED_3 20
 
 extern "C" {
 uint32_t read_runtime_ctr(void) {
     return timer_hw->timerawl;
     }
 }
-const uint lock_sequence[] = {0, 0, 2, 1, 2};
-const size_t sequence_length = sizeof(lock_sequence) / sizeof(lock_sequence[0]);
 
-class Button{
+SemaphoreHandle_t xSemaphore;
+
+class LED{
 public:
-    Button(uint pin, uint nr): btn(pin), sw_nr(nr), pressed(false){
+    LED(uint pin): pin(pin){
         gpio_init(pin);
-        gpio_set_dir(pin, GPIO_IN);
-        gpio_pull_up(pin);
+        gpio_set_dir(pin, GPIO_OUT);
     }
-    bool pressed_switch(){
-        if (!gpio_get(btn) && !pressed) {
-            std::cout << "Switch " << sw_nr << " pressed" << std::endl;
-            return (pressed = true);
-        } else if (gpio_get(btn) && pressed) {
-            pressed = false;
+    void blink_led(int delay_ms, int count = 1){
+        for (int i = 0; i < count; ++i) {
+            gpio_put(pin, 1);
+            vTaskDelay(pdMS_TO_TICKS(delay_ms));
+            gpio_put(pin, 0);
+            vTaskDelay(pdMS_TO_TICKS(delay_ms));
         }
-        return false;
-    }
-    static QueueHandle_t shared_queue;
-    static void set_shared_queue(QueueHandle_t queue){
-        shared_queue = queue;
-    }
-    uint8_t get_sw_nr(){
-        return sw_nr;
     }
 private:
-    uint btn;
-    bool pressed;
-    uint sw_nr;
+    uint pin;
 };
-QueueHandle_t Button::shared_queue = nullptr;
 
-void read_switch(void *param){
-    Button *sw = (Button *)param;
-    uint sw_nr = sw->get_sw_nr();
-    QueueHandle_t queue = sw->shared_queue;
+void read_serial_port(void *param){
+    std::string text;
     while(true){
-        if(sw->pressed_switch()){
-            xQueueSendToBack(queue, &sw_nr, pdMS_TO_TICKS(5000));
-        }
         vTaskDelay(pdMS_TO_TICKS(50));
+        if(int rv = getchar_timeout_us(0); rv != PICO_ERROR_TIMEOUT){
+            std::cout << "Received: " << (char)rv << std::endl;
+            if(rv == '\n' || rv == '\r'){
+                std::cout << "Received: " << text << std::endl;
+                text.clear();
+//                xSemaphoreGive(xSemaphore);
+            } else {
+                text += static_cast<char>(rv);
+                xSemaphoreGive(xSemaphore);
+            }
+        }
     }
 }
-
-void process_data_input(void *param) {
-    QueueHandle_t queue = (QueueHandle_t)param;
-    uint received_sequence[sequence_length] = {};
-    size_t index = 0;
-
-    while (true) {
-        uint button_id;
-        if (xQueueReceive(queue, &button_id, pdMS_TO_TICKS(5000)) == pdTRUE) {
-            std::cout << "Number received: " << button_id << std::endl;
-            received_sequence[index] = button_id;
-            if (received_sequence[index] == lock_sequence[index]) {
-                index++;
-                if (index == sequence_length) {
-                    std::cout << "Lock Unlocked!" << std::endl;
-                    index = 0;
-                }
-            } else {
-                std::cout << "Wrong sequence, reset." << std::endl;
-                index = 0;
-            }
-        } else {
-            std::cout << "Timeout, reset" << std::endl;
-            index = 0;
+void blinker_task(void *param){
+    LED *led = (LED *)param;
+    while(true){
+        if(xSemaphoreTake(xSemaphore, portMAX_DELAY) == pdTRUE){
+            led->blink_led(100);
         }
     }
 }
 
 int main() {
     stdio_init_all();
-
-    QueueHandle_t button_queue = xQueueCreate(8, sizeof(int));
-    Button::set_shared_queue(button_queue);
-
-    static Button sw0(SW0, 0);
-    static Button sw1(SW1, 1);
-    static Button sw2(SW2, 2);
-
-    xTaskCreate(read_switch, "SwitchReader0", 256, (void *)&sw0, tskIDLE_PRIORITY + 1, NULL);
-    xTaskCreate(read_switch, "SwitchReader1", 256, (void *)&sw1, tskIDLE_PRIORITY + 1, NULL);
-    xTaskCreate(read_switch, "SwitchReader0", 256, (void *)&sw2, tskIDLE_PRIORITY + 1, NULL);
-
-    xTaskCreate(process_data_input, "ProcessLockPw", 512, (void *)button_queue, tskIDLE_PRIORITY + 2, NULL);
+    static LED led1(LED_1);
+    xSemaphore = xSemaphoreCreateBinary();
+    xTaskCreate(read_serial_port, "ReadSerialPort", 256, NULL, tskIDLE_PRIORITY + 1, NULL);
+    xTaskCreate(blinker_task, "BlinkerTask", 256, (void *)&led1, tskIDLE_PRIORITY + 1, NULL);
 
     vTaskStartScheduler();
 
