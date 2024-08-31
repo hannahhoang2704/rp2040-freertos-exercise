@@ -18,10 +18,6 @@
 #define SW1 8
 #define SW2 7
 
-#define LED_1 20
-#define LED_2 21
-#define LED_3 22
-
 extern "C" {
 uint32_t read_runtime_ctr(void) {
     return timer_hw->timerawl;
@@ -100,6 +96,7 @@ int main() {
     stdio_init_all();
 
     Button::shared_queue = xQueueCreate(8, sizeof(int));
+    vQueueAddToRegistry(Button::shared_queue, "ButtonQueue");
 
     static Button sw0(SW0, 0);
     static Button sw1(SW1, 1);
