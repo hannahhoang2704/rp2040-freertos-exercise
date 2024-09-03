@@ -57,10 +57,10 @@ void read_serial_port(void *param){
             if(rv == '\n' || rv == '\r'){
                 std::cout << "Received: " << text << std::endl;
                 text.clear();
+                xSemaphoreGive(xSemaphore);
             } else {
                 text += static_cast<char>(rv);
             }
-            xSemaphoreGive(xSemaphore);
         }else{
             vTaskDelay(pdMS_TO_TICKS(10));
         }
