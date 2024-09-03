@@ -52,17 +52,17 @@ private:
 void read_serial_port(void *param){
     std::string text;
     while(true){
-        vTaskDelay(pdMS_TO_TICKS(50));
         if(int rv = getchar_timeout_us(0); rv != PICO_ERROR_TIMEOUT){
             std::cout << "Received: " << (char)rv << std::endl;
             if(rv == '\n' || rv == '\r'){
                 std::cout << "Received: " << text << std::endl;
                 text.clear();
-//                xSemaphoreGive(xSemaphore);
             } else {
                 text += static_cast<char>(rv);
-                xSemaphoreGive(xSemaphore);
             }
+            xSemaphoreGive(xSemaphore);
+        }else{
+            vTaskDelay(pdMS_TO_TICKS(10));
         }
     }
 }
@@ -80,7 +80,7 @@ int main() {
     static LED led1(LED_1);
     xSemaphore = xSemaphoreCreateBinary();
     xTaskCreate(read_serial_port, "ReadSerialPort", 256, NULL, tskIDLE_PRIORITY + 1, NULL);
-    xTaskCreate(blinker_task, "BlinkerTask", 256, (void *)&led1, tskIDLE_PRIORITY + 1, NULL);
+    xTaskCreate(blinker_task, "BlinkerTask", 256, (void *)&led1, tskIDLE_PRIORITY + 2, NULL);
 
     vTaskStartScheduler();
 
