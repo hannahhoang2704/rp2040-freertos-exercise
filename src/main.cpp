@@ -39,42 +39,13 @@ uint32_t read_runtime_ctr(void) {
     }
 }
 
-SemaphoreHandle_t xSemaphore;
+SemaphoreHandle_t xSemaphore_Rotary;
 QueueHandle_t event_queue;
-struct GPIO_event{
-    uint gpio;
-    uint32_t events;
-};
+QueueHandle_t delay_value_queue;
+enum rotation_direction {COUNTER_CLOCKWISE, CLOCKWISE};
+enum rotation_direction rotation;
 
-class RotaryEncoder{
-public:
-    RotaryEncoder(uint rot_a, uint rot_b, uint rot_sw): rot_a(rot_a), rot_b(rot_b), rot_sw(rot_sw){
-        gpio_init(rot_a);
-        gpio_init(rot_b);
-        gpio_init(rot_sw);
-        gpio_set_dir(rot_a, GPIO_IN);
-        gpio_set_dir(rot_b, GPIO_IN);
-        gpio_set_dir(rot_sw, GPIO_IN);
-        gpio_pull_up(rot_sw);
-    }
-    static void gpio_callback(uint gpio, uint32_t events){
-//        if(gpio == ROT_SW){
-//            BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-//            xSemaphoreGiveFromISR(xSemaphore, &xHigherPriorityTaskWoken);
-//            portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
-//        }
-//        else if(gpio == ROT_A){
-//            if(gpio_get(ROT_B)){
-//
-//            }
-//        }
-            GPIO_event event = {gpio, events};
-            BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-            xSemaphoreGiveFromISR(xSemaphore, &xHigherPriorityTaskWoken);
-            portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
-//            xQueueSendToBackFromISR(event_queue, &event, NULL);
-    }
-
+struct rotary_encoder{
     uint rot_a;
     uint rot_b;
     uint rot_sw;
@@ -82,61 +53,116 @@ public:
 
 class LED{
 public:
-    LED(uint pin, int delay_ms = MAX_DELAY): pin(pin), delay_ms(delay_ms){
+    LED(uint pin, int delay_ms = MAX_DELAY): pin(pin), delay_ms(delay_ms), led_state(false){
         gpio_init(pin);
         gpio_set_dir(pin, GPIO_OUT);
     }
-    void blink_led(){
+    void blink_led(int delay){
+        if(led_state){
+            delay_ms = delay;
             gpio_put(pin, 1);
             vTaskDelay(pdMS_TO_TICKS(delay_ms));
             gpio_put(pin, 0);
             vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        }
     }
 
     void toggle_led(){
-        gpio_put(pin, !gpio_get(pin));
+        led_state = !led_state;
+        gpio_put(pin, led_state ? 1 : 0);
     }
 
-    int led_state(){
-        return gpio_get(pin);
+    bool is_led_on(){
+        return led_state;
     }
+
+    int get_delay(){
+        return delay_ms;
+    }
+
 private:
     uint pin;
     int delay_ms;
+    bool led_state;
 };
+static void gpio_callback(uint gpio, uint32_t events){
+    if (gpio == ROT_A){
+        if(gpio_get(ROT_B)){
+            //clockwise
+            rotation = CLOCKWISE;
+            xQueueSendToBackFromISR(event_queue, &rotation, NULL);
+        }else{
+            //counter clockwise
+            rotation = COUNTER_CLOCKWISE;
+            xQueueSendToBackFromISR(event_queue, &rotation, NULL);
+        }
+    }else if (gpio == ROT_SW){
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        xSemaphoreGiveFromISR(xSemaphore_Rotary, &xHigherPriorityTaskWoken);
+        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+    }
+}
 
 void led_task(void *param){
     LED *led = (LED *)param;
+    int delay_ms;
     while(true){
-        led->blink_led();
+        if(led->is_led_on() && xQueueReceive(delay_value_queue, &delay_ms, pdMS_TO_TICKS(100)) == pdTRUE){
+            led->blink_led(delay_ms);
+        }else{
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
     }
 }
-void gpio_task(void *param){
-    RotaryEncoder *rotary_encoder = (RotaryEncoder *)param;
-
+void receive_gpio_event(void *param){
+    rotary_encoder *rotary = (rotary_encoder *) param;
+    int delay_ms;
+    gpio_set_irq_enabled_with_callback(rotary->rot_a, GPIO_IRQ_EDGE_FALL, true, &gpio_callback);
+    while(true) {
+        if (xQueueReceiveFromISR(event_queue, &rotation, NULL) == pdTRUE) {
+            if (rotation == CLOCKWISE) {
+                std::cout << "Counter clockwise" << std::endl;
+                if (delay_ms > MIN_DELAY) {
+                    delay_ms -= 5;
+                    xQueueSendToBack(delay_value_queue, &delay_ms, pdMS_TO_TICKS(100));
+                }
+            } else if (rotation == COUNTER_CLOCKWISE) {
+                std::cout << "Counter anti-clockwise" << std::endl;
+                if (delay_ms < MAX_DELAY) {
+                    delay_ms += 5;
+                    xQueueSendToBack(delay_value_queue, &delay_ms, pdMS_TO_TICKS(100));
+                }
+            }
+        }
+    }
 }
+
 void toggle_task(void *param){
-    LED *led = (LED *)param;
+    rotary_encoder *rotary = (rotary_encoder *) param;
+    gpio_set_irq_enabled_with_callback(rotary->rot_sw, GPIO_IRQ_EDGE_FALL, true, &gpio_callback);
     while(true){
-
+        if (xSemaphoreTake(xSemaphore_Rotary, pdMS_TO_TICKS(DEBOUNCE_SW_ROT_MS)) == pdTRUE){
+            //toggle led
+            LED *led = (LED *)param;
+            led->toggle_led();
+        }
     }
 }
+
 int main() {
     stdio_init_all();
     static LED led1(LED_1);
-    static RotaryEncoder rotary_encoder(ROT_A, ROT_B, ROT_SW);
-    event_queue = xQueueCreate(10, sizeof(int));
+    rotary_encoder rotary_encoder = {ROT_A, ROT_B, ROT_SW};
+    event_queue = xQueueCreate(50, sizeof(rotation_direction));
+    delay_value_queue = xQueueCreate(50, sizeof(int));
     vQueueAddToRegistry(event_queue, "GPIOQueue");
-    xSemaphore = xSemaphoreCreateBinary();
+    vQueueAddToRegistry(delay_value_queue, "Delay_ms_Queue");
+    xSemaphore_Rotary = xSemaphoreCreateBinary();
     xTaskCreate(led_task, "Led_task", 512, (void *)&led1, tskIDLE_PRIORITY + 1, NULL);
-    xTaskCreate(gpio_task, "GPIO_Task", 512, (void *)&led1, tskIDLE_PRIORITY + 2, NULL);
-    xTaskCreate(toggle_task, "toggle_task", 512, (void *)&led1, tskIDLE_PRIORITY + 3, NULL);
-
-    gpio_set_irq_enabled_with_callback(rotary_encoder.rot_a, GPIO_IRQ_EDGE_FALL, true, &RotaryEncoder::gpio_callback);
-    gpio_set_irq_enabled_with_callback(rotary_encoder.rot_sw, GPIO_IRQ_EDGE_FALL, true, &RotaryEncoder::gpio_callback);
+    xTaskCreate(receive_gpio_event, "Filter_GPIO_event", 512, (void *)&rotary_encoder, tskIDLE_PRIORITY + 2, NULL);
+    xTaskCreate(toggle_task, "Rotary_press", 512, (void *)&rotary_encoder, tskIDLE_PRIORITY + 3, NULL);
 
     vTaskStartScheduler();
 
     while (1) {};
-    return 0;
 }
