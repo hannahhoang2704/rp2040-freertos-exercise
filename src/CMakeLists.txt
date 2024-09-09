@@ -1,5 +1,8 @@
 add_executable(${ProjectName}
-    main.cpp
+        main.cpp
+        PicoOsUart.cpp
+        PicoOsUart.h
+        uart_test.cpp
 )
 
 target_include_directories(${ProjectName} PRIVATE
