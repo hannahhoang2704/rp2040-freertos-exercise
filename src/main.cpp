@@ -40,7 +40,6 @@ uint32_t read_runtime_ctr(void) {
 }
 
 SemaphoreHandle_t xSemaphore_Rotary;
-SemaphoreHandle_t xMutex_delay_ms;
 QueueHandle_t event_queue;
 
 enum rotation_direction {COUNTER_CLOCKWISE, CLOCKWISE};
@@ -60,24 +59,27 @@ public:
 
     static void gpio_callback(uint gpio, uint32_t events) {
         static uint32_t last_press_time = 0;
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
         if (gpio == ROT_A){
-            if(gpio_get(ROT_B)){
-                rotation = CLOCKWISE;
-                xQueueSendToBackFromISR(event_queue, &rotation, NULL);
-            }else{
-                rotation = COUNTER_CLOCKWISE;
-                xQueueSendToBackFromISR(event_queue, &rotation, NULL);
+            uint32_t current_time = to_ms_since_boot(get_absolute_time());
+            if ((current_time - last_press_time) > DEBOUNCE_SW_ROT_MS) {
+                last_press_time = current_time;
+                if(gpio_get(ROT_B)){
+                    rotation = CLOCKWISE;
+                    xQueueSendToBackFromISR(event_queue, &rotation, &xHigherPriorityTaskWoken);
+                }else{
+                    rotation = COUNTER_CLOCKWISE;
+                    xQueueSendToBackFromISR(event_queue, &rotation, &xHigherPriorityTaskWoken);
+                }
             }
         }else if (gpio == ROT_SW){
-//            uint32_t current_time = time_us_32();
             uint32_t current_time = to_ms_since_boot(get_absolute_time());
-            BaseType_t xHigherPriorityTaskWoken = pdFALSE;
             if ((current_time - last_press_time) > DEBOUNCE_SW_ROT_MS) {
                 last_press_time = current_time;
                 xSemaphoreGiveFromISR(xSemaphore_Rotary, &xHigherPriorityTaskWoken);
-                portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
             }
         }
+        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
     }
     uint rot_a;
     uint rot_b;
@@ -101,7 +103,7 @@ public:
     }
 
     void toggle_led(){
-        led_state = !led_state;
+        led_state = !led_state; //should use mutex for thread safety
         gpio_put(pin, led_state ? 1 : 0);
     }
 
@@ -133,7 +135,7 @@ void receive_gpio_event(void *param){
     LED *led = (LED *)param;
     rotation_direction rotation_event;
     while(true) {
-        if (xQueueReceiveFromISR(event_queue, &rotation_event, NULL) == pdTRUE) {
+        if (xQueueReceive(event_queue, &rotation_event, 10) == pdTRUE) {
             if(led->is_led_on()){
                 uint current_delay = led->get_delay();
                 if (rotation == CLOCKWISE) {
@@ -149,8 +151,6 @@ void receive_gpio_event(void *param){
                 }
                 printf("Delay: %d ms, frequency is %u Hz\n", current_delay, 1000/current_delay);
             }
-        }else{
-            vTaskDelay(pdMS_TO_TICKS(10));
         }
     }
 }
@@ -174,7 +174,6 @@ int main() {
     event_queue = xQueueCreate(50, sizeof(rotation_direction));
     vQueueAddToRegistry(event_queue, "GPIOQueue");
     xSemaphore_Rotary = xSemaphoreCreateBinary();
-    xMutex_delay_ms = xSemaphoreCreateMutex();
 
     gpio_set_irq_enabled_with_callback(ROT_A, GPIO_IRQ_EDGE_FALL, true, &RotaryEncoder::gpio_callback);
     gpio_set_irq_enabled_with_callback(ROT_SW, GPIO_IRQ_EDGE_FALL, true, &RotaryEncoder::gpio_callback);
