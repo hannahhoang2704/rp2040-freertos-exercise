@@ -61,16 +61,12 @@ public:
         static uint32_t last_press_time = 0;
         BaseType_t xHigherPriorityTaskWoken = pdFALSE;
         if (gpio == ROT_A){
-            uint32_t current_time = to_ms_since_boot(get_absolute_time());
-            if ((current_time - last_press_time) > DEBOUNCE_SW_ROT_MS) {
-                last_press_time = current_time;
-                if(gpio_get(ROT_B)){
-                    rotation = CLOCKWISE;
-                    xQueueSendToBackFromISR(event_queue, &rotation, &xHigherPriorityTaskWoken);
-                }else{
-                    rotation = COUNTER_CLOCKWISE;
-                    xQueueSendToBackFromISR(event_queue, &rotation, &xHigherPriorityTaskWoken);
-                }
+            if(gpio_get(ROT_B)){
+                rotation = CLOCKWISE;
+                xQueueSendToBackFromISR(event_queue, &rotation, &xHigherPriorityTaskWoken);
+            }else{
+                rotation = COUNTER_CLOCKWISE;
+                xQueueSendToBackFromISR(event_queue, &rotation, &xHigherPriorityTaskWoken);
             }
         }else if (gpio == ROT_SW){
             uint32_t current_time = to_ms_since_boot(get_absolute_time());
@@ -92,6 +88,7 @@ public:
         gpio_init(pin);
         gpio_set_dir(pin, GPIO_OUT);
         gpio_put(pin, 0);
+        xLedStateMutex = xSemaphoreCreateMutex();
     }
     void blink_led(){
         if(led_state){
@@ -103,12 +100,23 @@ public:
     }
 
     void toggle_led(){
-        led_state = !led_state; //should use mutex for thread safety
-        gpio_put(pin, led_state ? 1 : 0);
+        if(xLedStateMutex!=NULL){
+            if(xSemaphoreTake(xLedStateMutex, portMAX_DELAY) == pdTRUE){
+                led_state = !led_state;
+                gpio_put(pin, led_state ? 1 : 0);
+                xSemaphoreGive(xLedStateMutex);
+            }
+        }
     }
 
     bool is_led_on(){
-        return led_state;
+        if(xLedStateMutex != NULL){
+            if(xSemaphoreTake(xLedStateMutex, portMAX_DELAY) == pdTRUE){
+                bool state = led_state;
+                xSemaphoreGive(xLedStateMutex);
+                return state;
+            }
+        }
     }
 
     int get_delay(){
@@ -123,6 +131,7 @@ private:
     uint pin;
     int delay_ms;
     bool led_state;
+    SemaphoreHandle_t xLedStateMutex;
 };
 
 void led_task(void *param){
