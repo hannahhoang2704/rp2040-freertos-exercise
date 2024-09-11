@@ -36,10 +36,10 @@ uint32_t read_runtime_ctr(void) {
     }
 }
 
-const std::string commands[] = {"help", "interval", "time"};
+const char *commands[] = {"help", "interval", "time"};
 enum command_index {HELP, INTERVAL, TIME, UNKNOWN};
-static std::string command_buffer;
-static TimerHandle_t xLedToggleTimer = NULL;
+static TimerHandle_t xLedToggleTimer;
+static TimerHandle_t xCommandTimer;
 
 class LED{
 public:
@@ -50,7 +50,7 @@ public:
 
     void toggle_led(){
         gpio_put(pin, !gpio_get(pin));
-        toggle_time = read_runtime_ctr();
+        toggle_time = time_us_32();
     }
 
     uint32_t get_toggle_time(){
@@ -61,24 +61,34 @@ private:
     uint pin;
     uint32_t toggle_time = 0;
 };
-static LED led(LED_1);
 
-command_index get_command_index(const std::string input_command, const std::string (&commands)[3]){
-    if(input_command.compare(commands[HELP]) == 0){
+struct parameter{
+    LED *led;
+    PicoOsUart *uart;
+    char command_buffer[64];
+    int command_idx;
+    bool received_command = false;
+};
+
+command_index get_command_index(const char *input_command, const char *commands[]){
+    if(strcmp(input_command, commands[HELP]) == 0){
         return HELP;
     }
-    if(input_command.find(commands[INTERVAL]) != std::string::npos){
+    if(strncmp(input_command, commands[INTERVAL], 8) == 0) {
         return INTERVAL;
     }
-    if(input_command.compare(commands[TIME]) == 0){
+    if(strcmp(input_command, commands[TIME]) == 0){
         return TIME;
     }
     return UNKNOWN;
 }
 
-void process_command(PicoOsUart *uart, LED *led){
-    command_index command_idx = get_command_index(command_buffer, commands);
-    switch(command_idx){
+void process_command(parameter *param){
+    LED *led = param->led;
+    PicoOsUart *uart = param->uart;
+    char *command_buffer = param->command_buffer;
+    auto command_nr = get_command_index(command_buffer, commands);
+    switch(command_nr){
         case HELP:{
             uart->send("help: display usage instructions\n");
             uart->send("interval <number>:  set the led toggle interval\n");
@@ -87,17 +97,17 @@ void process_command(PicoOsUart *uart, LED *led){
         }
         case INTERVAL:{
             int interval_s = 0;
-            if (sscanf(command_buffer.c_str(), "interval %d", &interval_s) == 1){
-                std::cout << "Interval set to " << interval_s << " s\n";
-                xTimerChangePeriod(xLedToggleTimer, pdMS_TO_TICKS(interval_s * 1000), 0);
-                uart->send("New interval changed\n");
-            } else {
-                uart->send("Invalid interval\n");
+            if (sscanf(command_buffer, "interval %d", &interval_s) == 1) {
+                if (xTimerChangePeriod(xLedToggleTimer, pdMS_TO_TICKS(interval_s * 1000), 0) == pdPASS) {
+                    uart->send("Interval changed\n");
+                } else {
+                    uart->send("Interval change failed\n");
+                }
             }
             break;
         }
         case TIME:{
-            uint32_t elapsed_time = (read_runtime_ctr() - led->get_toggle_time())/10000;
+            uint32_t elapsed_time = (time_us_32() - led->get_toggle_time())/1000000;
             uart->send("Time since last led toggle: " + std::to_string(elapsed_time) + " s\n");
             break;
         }
@@ -106,44 +116,28 @@ void process_command(PicoOsUart *uart, LED *led){
             uart->send("Unknown command\n");
             break;
     }
-    command_buffer.clear();
+    param->command_idx = 0;
+    command_buffer[param->command_idx] = '\0';
 }
 
-//void serial_task(void *param)
-//{
-//    LED *led = (LED *)param;
-//    PicoOsUart uart(UART_NR, UART_TX_PIN, UART_RX_PIN, PICO_DEFAULT_UART_BAUD_RATE);
-//    uint8_t buffer[64];
-//    while (true) {
-//        if(int count = uart.read(buffer, 64, 500); count > 0) {
-//            uart.write(buffer, count);
-//            for(int i = 0; i < count; ++i){
-//                std::cout << "receive " << buffer[i] << std::endl;
-//                if(buffer[i] == '\n' || buffer[i] == '\r'){
-//                    process_command(&uart, led);
-//                } else {
-//                    command_buffer += static_cast<char>(buffer[i]);
-//                }
-//            }
-//        }else{
-//            vTaskDelay(pdMS_TO_TICKS(10));
-//        }
-//    }
-//}
 
 void serial_task(void *param)
 {
-    LED *led = (LED *)param;
-    PicoOsUart uart(UART_NR, UART_TX_PIN, UART_RX_PIN, PICO_DEFAULT_UART_BAUD_RATE);
+    parameter *p = (parameter *)param;
+    PicoOsUart *uart = p->uart;
+    char *command_buffer = p->command_buffer;
+    int &command_idx = p->command_idx;
     uint8_t buffer[64];
     while (true) {
-        if(int count = uart.read(buffer, 64, 30); count > 0) {
-            for(int i = 0; i < count; ++i){
-                std::cout << "receive " << buffer[i] << std::endl;
+        if(int count = uart->read(buffer, 64, 30); count > 0) {
+            xTimerReset(xCommandTimer, 0);
+            uart->write(buffer, count);
+            for(int i=0; i < count; ++i){
                 if(buffer[i] == '\n' || buffer[i] == '\r'){
-                    process_command(&uart, led);
+                    command_buffer[command_idx] = '\0';
+                    process_command(p);
                 } else {
-                    command_buffer += static_cast<char>(buffer[i]);
+                    command_buffer[command_idx++] = buffer[i];
                 }
             }
         }
@@ -151,18 +145,26 @@ void serial_task(void *param)
 }
 
 void vLedTimerCallback(TimerHandle_t xTimer){
-    led.toggle_led();
+    parameter *param = (parameter *)pvTimerGetTimerID(xTimer);
+    LED *led = param->led;
+    led->toggle_led();
 }
 
 void vCommandTimerCallback(TimerHandle_t xTimer){
-    PicoOsUart uart(UART_NR, UART_TX_PIN, UART_RX_PIN, PICO_DEFAULT_UART_BAUD_RATE);
-    command_buffer.clear();
-    uart.send("[Inactive]\n");
+    parameter *param = (parameter *)pvTimerGetTimerID(xTimer);
+    PicoOsUart *uart = param -> uart;
+    char *command_buffer = param->command_buffer;
+    param->command_idx = 0;
+    command_buffer[0] = '\0';
+    uart->send("[Inactive]\n");
 }
 
 int main() {
-    TimerHandle_t xCommandTimer = xTimerCreate("CommandTimer", pdMS_TO_TICKS(COMMAND_TIMER_MS), pdTRUE, (void *)0, vCommandTimerCallback);
-    TimerHandle_t xLedToggleTimer = xTimerCreate("LedToggleTimers", pdMS_TO_TICKS(DEFAULT_LED_INTERVAL), pdTRUE, (void *)0, vLedTimerCallback);
+    static LED led(LED_1);
+    PicoOsUart uart(UART_NR, UART_TX_PIN, UART_RX_PIN, PICO_DEFAULT_UART_BAUD_RATE);
+    parameter param = {.led = &led, .uart = &uart, .command_idx = 0};
+    xCommandTimer = xTimerCreate("CommandTimer", pdMS_TO_TICKS(COMMAND_TIMER_MS), pdFALSE, (void *)&param, vCommandTimerCallback);
+    xLedToggleTimer = xTimerCreate("LedToggleTimers", pdMS_TO_TICKS(DEFAULT_LED_INTERVAL), pdTRUE, (void *)&param, vLedTimerCallback);
 
     if(xLedToggleTimer != NULL){
         xTimerStart(xLedToggleTimer, 0);
@@ -170,8 +172,7 @@ int main() {
     if(xCommandTimer != NULL){
         xTimerStart(xCommandTimer, 0);
     }
-//    serial_task();
-    xTaskCreate(serial_task, "Serial_Reader_task", 1024, (void *)&led, tskIDLE_PRIORITY+1, NULL);
+    xTaskCreate(serial_task, "Serial_Reader_task", 1024, (void *)&param, tskIDLE_PRIORITY+1, NULL);
     vTaskStartScheduler();
 
     while (1) {};
