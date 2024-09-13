@@ -1,14 +1,11 @@
 
-
-//Implement a program that reads commands from the serial port using the provided interrupt driven
-// FreeRTOS uart driver. The program creates two timers: one for inactivity monitoring and one for toggling
-// the green led. If no characters are received in 30 seconds all the characters received so far are discarded
-// and the program prints “[Inactive]”. When a character is received the inactivity timer is started/reset.
-//When enter is pressed the received character are processed in a command interpreter. The commands are:
-//• help – display usage instructions
-//• interval <number> - set the led toggle interval (default is 5 seconds)
-//• time – prints the number of seconds with 0.1s accuracy since the last led toggle
-//If no valid command is found the program prints: “unknown command”.
+//exercise 4.1
+//Implement a program with four tasks and an event group. Task 1 waits for user to press a button. When the
+//button is pressed task 1 sets bit 0 of the event group. Tasks 2 and 3 wait on the event bit with an infinite
+//timeout. When the bit is set the tasks start running their main loops. In the main loop each task prints task
+//number and number of elapsed ticks since the last print at random interval that is between 1 – 2 seconds.
+//Task 4 is debug print task. Tasks 1 – 3 must run at higher priority than the debug task. The tasks must use
+//the debug function described above for printing.
 
 #include <iostream>
 #include <string>
@@ -16,19 +13,13 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "queue.h"
-#include "semphr.h"
+#include "event_groups.h"
 #include "pico/stdlib.h"
 #include "timers.h"
 #include "PicoOsUart.h"
+#include "button.h"
 
-
-#define LED_1 22
-
-#define UART_TX_PIN 0
-#define UART_RX_PIN 1
-#define UART_NR 0
-#define COMMAND_TIMER_MS 30*1000
-#define DEFAULT_LED_INTERVAL 5*1000
+#define BUTTON_PRESS_BIT (1 << 0)
 
 extern "C" {
 uint32_t read_runtime_ctr(void) {
@@ -36,143 +27,96 @@ uint32_t read_runtime_ctr(void) {
     }
 }
 
-const char *commands[] = {"help", "interval", "time"};
-enum command_index {HELP, INTERVAL, TIME, UNKNOWN};
-static TimerHandle_t xLedToggleTimer;
-static TimerHandle_t xCommandTimer;
+QueueHandle_t syslog_q;
+EventGroupHandle_t xEvent_group;
 
-class LED{
-public:
-    LED(uint pin): pin(pin){
-        gpio_init(pin);
-        gpio_set_dir(pin, GPIO_OUT);
-    }
+void debug(const char *format, uint32_t d1, uint32_t d2, uint32_t d3);
 
-    void toggle_led(){
-        gpio_put(pin, !gpio_get(pin));
-        toggle_time = time_us_32();
-    }
-
-    uint32_t get_toggle_time(){
-        return toggle_time;
-    }
-
-private:
-    uint pin;
-    uint32_t toggle_time = 0;
+struct debugEvent{
+    const char *format;
+    uint32_t data[3];
+    float timestamp;
 };
 
-struct parameter{
-    LED *led;
-    PicoOsUart *uart;
-    char command_buffer[64];
-    int command_idx;
-    bool received_command = false;
-};
-
-command_index get_command_index(const char *input_command, const char *commands[]){
-    if(strcmp(input_command, commands[HELP]) == 0){
-        return HELP;
+void debugTask(void *pvParameters){
+    char buffer[125];
+    debugEvent event;
+    while(true){
+        if(xQueueReceive(syslog_q, &event, portMAX_DELAY) == pdTRUE){
+            char formatted_message[100];
+            snprintf(formatted_message, sizeof (formatted_message), event.format, event.data[0], event.data[1], event.data[2]);
+            snprintf(buffer, sizeof(buffer), "[%.2f s]\t%s", event.timestamp, formatted_message);
+            std::cout << buffer << std::endl;
+        }
     }
-    if(strncmp(input_command, commands[INTERVAL], 8) == 0) {
-        return INTERVAL;
-    }
-    if(strcmp(input_command, commands[TIME]) == 0){
-        return TIME;
-    }
-    return UNKNOWN;
 }
 
-void process_command(parameter *param){
-    LED *led = param->led;
-    PicoOsUart *uart = param->uart;
-    char *command_buffer = param->command_buffer;
-    auto command_nr = get_command_index(command_buffer, commands);
-    switch(command_nr){
-        case HELP:{
-            uart->send("help: display usage instructions\n");
-            uart->send("interval <number>:  set the led toggle interval\n");
-            uart->send("time:  prints the number of seconds the last led toggle\n");
-            break;
-        }
-        case INTERVAL:{
-            int interval_s = 0;
-            if (sscanf(command_buffer, "interval %d", &interval_s) == 1) {
-                if (xTimerChangePeriod(xLedToggleTimer, pdMS_TO_TICKS(interval_s * 1000), 0) == pdPASS) {
-                    uart->send("Interval changed\n");
-                } else {
-                    uart->send("Interval change failed\n");
-                }
-            }
-            break;
-        }
-        case TIME:{
-            uint32_t elapsed_time = (time_us_32() - led->get_toggle_time())/1000000;
-            uart->send("Time since last led toggle: " + std::to_string(elapsed_time) + " s\n");
-            break;
-        }
-        case UNKNOWN:
-        default:
-            uart->send("Unknown command\n");
-            break;
-    }
-    param->command_idx = 0;
-    command_buffer[param->command_idx] = '\0';
+void debug(const char *format, uint32_t d1, uint32_t d2, uint32_t d3){
+    uint32_t current_timestamp_us = time_us_32();
+    float current_timestamp_s = current_timestamp_us / 1000000.0f;
+    debugEvent event = {.format = format, .data = {d1, d2, d3}, .timestamp = current_timestamp_s};
+    xQueueSendToBack(syslog_q, &event, 0);
 }
 
+void button_task(void *pvParameters){
+    Button *btn = (Button *)pvParameters;
+    while(true){
+        if(btn->pressed_switch()){
+            debug("Button pressed on pin %d", btn->get_sw_nr(), 0, 0);
+            xEventGroupSetBits(xEvent_group, 0x01);
+        }else{
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+    }
+}
 
-void serial_task(void *param)
-{
-    parameter *p = (parameter *)param;
-    PicoOsUart *uart = p->uart;
-    char *command_buffer = p->command_buffer;
-    int &command_idx = p->command_idx;
-    uint8_t buffer[64];
+void task2(void *param){
+    const uint32_t task_number = 2;
+    const TickType_t max_delay = pdMS_TO_TICKS(2000); // Max delay for random interval
+    const TickType_t min_delay = pdMS_TO_TICKS(1000); // Min delay for random interval
+    EventBits_t uxBits;
+    srand(xTaskGetTickCount() + task_number);
     while (true) {
-        if(int count = uart->read(buffer, 64, 30); count > 0) {
-            xTimerReset(xCommandTimer, 0);
-            uart->write(buffer, count);
-            for(int i=0; i < count; ++i){
-                if(buffer[i] == '\n' || buffer[i] == '\r'){
-                    command_buffer[command_idx] = '\0';
-                    process_command(p);
-                } else {
-                    command_buffer[command_idx++] = buffer[i];
-                }
-            }
+        uxBits = xEventGroupWaitBits(xEvent_group, BUTTON_PRESS_BIT, pdTRUE, pdTRUE, portMAX_DELAY);
+        if (uxBits & BUTTON_PRESS_BIT) {
+            TickType_t delay = (rand() % (max_delay - min_delay)) + min_delay;
+            vTaskDelay(delay);
+            uint32_t elapsed_ticks = xTaskGetTickCount();
+            debug("Task %d running. Elapsed ticks: %u ms", task_number, elapsed_ticks, 0);
         }
     }
 }
 
-void vLedTimerCallback(TimerHandle_t xTimer){
-    parameter *param = (parameter *)pvTimerGetTimerID(xTimer);
-    LED *led = param->led;
-    led->toggle_led();
-}
-
-void vCommandTimerCallback(TimerHandle_t xTimer){
-    parameter *param = (parameter *)pvTimerGetTimerID(xTimer);
-    PicoOsUart *uart = param -> uart;
-    char *command_buffer = param->command_buffer;
-    param->command_idx = 0;
-    command_buffer[0] = '\0';
-    uart->send("[Inactive]\n");
+void task3(void *param){
+    const uint32_t task_number = 3;
+    const TickType_t max_delay = pdMS_TO_TICKS(2000); // Max delay for random interval
+    const TickType_t min_delay = pdMS_TO_TICKS(1000); // Min delay for random interval
+    EventBits_t uxBits;
+    srand(xTaskGetTickCount() + task_number);
+    while (true) {
+        uxBits = xEventGroupWaitBits(xEvent_group, BUTTON_PRESS_BIT, pdTRUE, pdTRUE, portMAX_DELAY);
+        if (uxBits & BUTTON_PRESS_BIT) {
+            TickType_t delay = (rand() % (max_delay - min_delay)) + min_delay;
+            vTaskDelay(delay);
+            uint32_t elapsed_ticks = xTaskGetTickCount();
+            debug("Task %d running. Elapsed ticks: %u ms", task_number, elapsed_ticks, 0);
+        }
+    }
 }
 
 int main() {
-    static LED led(LED_1);
-    PicoOsUart uart(UART_NR, UART_TX_PIN, UART_RX_PIN, PICO_DEFAULT_UART_BAUD_RATE);
-    parameter param = {.led = &led, .uart = &uart, .command_idx = 0};
-    xCommandTimer = xTimerCreate("CommandTimer", pdMS_TO_TICKS(COMMAND_TIMER_MS), pdFALSE, (void *)&param, vCommandTimerCallback);
-    xLedToggleTimer = xTimerCreate("LedToggleTimers", pdMS_TO_TICKS(DEFAULT_LED_INTERVAL), pdTRUE, (void *)&param, vLedTimerCallback);
+    stdio_init_all();
+    static Button btn(SW_0, 0);
+    syslog_q = xQueueCreate(30, sizeof(debugEvent));
+    vQueueAddToRegistry(syslog_q, "debug_queue");
 
-    if(xLedToggleTimer != NULL){
-        xTimerStart(xLedToggleTimer, 0);
-    }
-    if(xCommandTimer != NULL){
-        xTimerStart(xCommandTimer, 0);
-    }
-    xTaskCreate(serial_task, "Serial_Reader_task", 1024, (void *)&param, tskIDLE_PRIORITY+1, NULL);
+    xEvent_group = xEventGroupCreate();
+
+    xTaskCreate(button_task, "button_task", 256, (void *)&btn, tskIDLE_PRIORITY+2, NULL);
+    xTaskCreate(task2, "task2", 256, NULL, tskIDLE_PRIORITY+2, NULL);
+    xTaskCreate(task3, "task3", 256, NULL, tskIDLE_PRIORITY+2, NULL);
+    xTaskCreate(debugTask, "debug_task", 256, NULL, tskIDLE_PRIORITY+1, NULL);
+
     vTaskStartScheduler();
 
     while (1) {};
