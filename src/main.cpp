@@ -107,8 +107,11 @@ void process_command(parameter *param){
             break;
         }
         case TIME:{
-            uint32_t elapsed_time = (time_us_32() - led->get_toggle_time())/1000000;
-            uart->send("Time since last led toggle: " + std::to_string(elapsed_time) + " s\n");
+            uint32_t elapsed_time_us = (time_us_32() - led->get_toggle_time());
+            float elapsed_time_s = (float)elapsed_time_us / 1000000.0f;
+            char buffer[64];
+            snprintf(buffer, sizeof(buffer), "Time since last led toggle: %.1f s\n", elapsed_time_s);
+            uart->send(buffer);
             break;
         }
         case UNKNOWN:
