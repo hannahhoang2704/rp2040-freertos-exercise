@@ -16,7 +16,6 @@
 #include "event_groups.h"
 #include "pico/stdlib.h"
 #include "timers.h"
-#include "PicoOsUart.h"
 #include "button.h"
 
 #define BUTTON_PRESS_BIT (1 << 0)
@@ -63,7 +62,7 @@ void button_task(void *pvParameters){
     while(true){
         if(btn->pressed_switch()){
             debug("Button pressed on pin %d", btn->get_sw_nr(), 0, 0);
-            xEventGroupSetBits(xEvent_group, 0x01);
+            xEventGroupSetBits(xEvent_group, BUTTON_PRESS_BIT);
         }else{
             vTaskDelay(pdMS_TO_TICKS(50));
         }
@@ -82,7 +81,7 @@ void task2(void *param){
             TickType_t delay = (rand() % (max_delay - min_delay)) + min_delay;
             vTaskDelay(delay);
             uint32_t elapsed_ticks = xTaskGetTickCount();
-            debug("Task %d running. Elapsed ticks: %u ms", task_number, elapsed_ticks, 0);
+            debug("Task %d. Elapsed ticks: %u ms", task_number, elapsed_ticks, 0);
         }
     }
 }
@@ -99,7 +98,7 @@ void task3(void *param){
             TickType_t delay = (rand() % (max_delay - min_delay)) + min_delay;
             vTaskDelay(delay);
             uint32_t elapsed_ticks = xTaskGetTickCount();
-            debug("Task %d running. Elapsed ticks: %u ms", task_number, elapsed_ticks, 0);
+            debug("Task %d. Elapsed ticks: %u ms", task_number, elapsed_ticks, 0);
         }
     }
 }
