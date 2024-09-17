@@ -19,6 +19,8 @@
 #include "button.h"
 
 #define BUTTON_PRESS_BIT (1 << 0)
+#define MAX_DELAY 2000
+#define MIN_DELAY 1000
 
 extern "C" {
 uint32_t read_runtime_ctr(void) {
@@ -34,74 +36,81 @@ void debug(const char *format, uint32_t d1, uint32_t d2, uint32_t d3);
 struct debugEvent{
     const char *format;
     uint32_t data[3];
-    float timestamp;
 };
+
 
 void debugTask(void *pvParameters){
     char buffer[125];
     debugEvent event;
     while(true){
         if(xQueueReceive(syslog_q, &event, portMAX_DELAY) == pdTRUE){
-            char formatted_message[100];
-            snprintf(formatted_message, sizeof (formatted_message), event.format, event.data[0], event.data[1], event.data[2]);
-            snprintf(buffer, sizeof(buffer), "[%.2f s]\t%s", event.timestamp, formatted_message);
+            snprintf(buffer, sizeof(buffer), event.format, event.data[0], event.data[1], event.data[2]);
             std::cout << buffer << std::endl;
         }
     }
 }
 
+
 void debug(const char *format, uint32_t d1, uint32_t d2, uint32_t d3){
-    uint32_t current_timestamp_us = time_us_32();
-    float current_timestamp_s = current_timestamp_us / 1000000.0f;
-    debugEvent event = {.format = format, .data = {d1, d2, d3}, .timestamp = current_timestamp_s};
+    debugEvent event = {.format = format, .data = {d1, d2, d3}};
     xQueueSendToBack(syslog_q, &event, 0);
 }
 
+
+uint32_t get_random_delay(uint32_t min_delay, uint32_t max_delay){
+    srand(time_us_32());
+    return (rand() % (max_delay - min_delay)) + min_delay;
+}k
+
 void button_task(void *pvParameters){
     Button *btn = (Button *)pvParameters;
+    const uint32_t task_number = 1;
+    while(!btn->pressed_switch()){
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    debug("Button pressed on pin %d", btn->get_sw_nr(), 0, 0);
+    xEventGroupSetBits(xEvent_group, BUTTON_PRESS_BIT);
+    TickType_t last_tick = xTaskGetTickCount();
     while(true){
-        if(btn->pressed_switch()){
-            debug("Button pressed on pin %d", btn->get_sw_nr(), 0, 0);
-            xEventGroupSetBits(xEvent_group, BUTTON_PRESS_BIT);
-        }else{
-            vTaskDelay(pdMS_TO_TICKS(50));
-        }
+        uint32_t delay = get_random_delay(MIN_DELAY, MAX_DELAY);
+        vTaskDelay(pdMS_TO_TICKS(delay));
+        TickType_t current_tick = xTaskGetTickCount();
+        debug("[%u ms] Task %d. Elapsed ticks since last print: %u ms", time_us_32()/1000,task_number, current_tick - last_tick);
+        last_tick = current_tick;
     }
 }
+
 
 void task2(void *param){
     const uint32_t task_number = 2;
-    const TickType_t max_delay = pdMS_TO_TICKS(2000); // Max delay for random interval
-    const TickType_t min_delay = pdMS_TO_TICKS(1000); // Min delay for random interval
-    EventBits_t uxBits;
-    srand(xTaskGetTickCount() + task_number);
-    while (true) {
-        uxBits = xEventGroupWaitBits(xEvent_group, BUTTON_PRESS_BIT, pdTRUE, pdTRUE, portMAX_DELAY);
-        if (uxBits & BUTTON_PRESS_BIT) {
-            TickType_t delay = (rand() % (max_delay - min_delay)) + min_delay;
-            vTaskDelay(delay);
-            uint32_t elapsed_ticks = xTaskGetTickCount();
-            debug("Task %d. Elapsed ticks: %u ms", task_number, elapsed_ticks, 0);
-        }
+    EventBits_t uxBits = xEventGroupWaitBits(xEvent_group, BUTTON_PRESS_BIT, pdTRUE, pdTRUE, portMAX_DELAY);
+    TickType_t last_tick = xTaskGetTickCount();
+    while ((uxBits & BUTTON_PRESS_BIT) != 0) {
+        uint32_t delay = get_random_delay(MIN_DELAY, MAX_DELAY);
+        vTaskDelay(pdMS_TO_TICKS(delay));
+        uint32_t current_timestamps = time_us_32()/1000;
+        TickType_t current_tick = xTaskGetTickCount();
+        debug("[%u ms] Task %d. Elapsed ticks since last print: %u ms", current_timestamps, task_number, current_tick-last_tick);
+        last_tick = current_tick;
     }
 }
 
+
+
 void task3(void *param){
     const uint32_t task_number = 3;
-    const TickType_t max_delay = pdMS_TO_TICKS(2000); // Max delay for random interval
-    const TickType_t min_delay = pdMS_TO_TICKS(1000); // Min delay for random interval
-    EventBits_t uxBits;
-    srand(xTaskGetTickCount() + task_number);
-    while (true) {
-        uxBits = xEventGroupWaitBits(xEvent_group, BUTTON_PRESS_BIT, pdTRUE, pdTRUE, portMAX_DELAY);
-        if (uxBits & BUTTON_PRESS_BIT) {
-            TickType_t delay = (rand() % (max_delay - min_delay)) + min_delay;
-            vTaskDelay(delay);
-            uint32_t elapsed_ticks = xTaskGetTickCount();
-            debug("Task %d. Elapsed ticks: %u ms", task_number, elapsed_ticks, 0);
-        }
+    EventBits_t  uxBits = xEventGroupWaitBits(xEvent_group, BUTTON_PRESS_BIT, pdTRUE, pdTRUE, portMAX_DELAY);
+    TickType_t last_tick = xTaskGetTickCount();
+    while ((uxBits & BUTTON_PRESS_BIT) != 0) {
+        uint32_t delay = get_random_delay(MIN_DELAY, MAX_DELAY);
+        vTaskDelay(pdMS_TO_TICKS(delay));
+        uint32_t current_timestamps = time_us_32()/1000;
+        TickType_t current_tick = xTaskGetTickCount();
+        debug("[%u ms] Task %d. Elapsed ticks since last print: %u ms", current_timestamps, task_number, current_tick-last_tick);
+        last_tick = current_tick;
     }
 }
+
 
 int main() {
     stdio_init_all();
