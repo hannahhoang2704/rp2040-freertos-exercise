@@ -103,7 +103,9 @@ void process_command(parameter *param){
                 } else {
                     uart->send("Interval change failed\n");
                 }
-            }
+            }else{
+                uart->send("Invalid interval\n");
+            };
             break;
         }
         case TIME:{
@@ -128,6 +130,7 @@ void serial_task(void *param)
 {
     parameter *p = (parameter *)param;
     PicoOsUart *uart = p->uart;
+    uart->flush();
     char *command_buffer = p->command_buffer;
     int &command_idx = p->command_idx;
     uint8_t buffer[64];
